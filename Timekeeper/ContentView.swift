@@ -7,12 +7,14 @@
 
 import Charts
 import SwiftUI
+import UIKit
 
 struct Habit: Identifiable {
     let id: UUID
     var name: String
     var symbolName: String
     var color: Color
+    var createdAt: Date
     var isTrackingEnabled: Bool
     var trackingUnit: String
     var goal: HabitGoal?
@@ -25,6 +27,7 @@ struct Habit: Identifiable {
         name: String,
         symbolName: String = "circle.fill",
         color: Color,
+        createdAt: Date = Date(),
         isTrackingEnabled: Bool = false,
         trackingUnit: String = "",
         goal: HabitGoal? = nil,
@@ -36,6 +39,7 @@ struct Habit: Identifiable {
         self.name = name
         self.symbolName = symbolName
         self.color = color
+        self.createdAt = createdAt
         self.isTrackingEnabled = isTrackingEnabled || goal != nil
         self.trackingUnit = goal?.unit ?? trackingUnit
         self.goal = goal
@@ -101,6 +105,41 @@ struct RewardStampEntry: Identifiable {
     }
 }
 
+enum RewardProgressRule: String, Codable, CaseIterable, Identifiable {
+    case automatic
+    case loggedQuantity
+    case completedDays
+    case goalMetDays
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic:
+            "Automatic"
+        case .loggedQuantity:
+            "Logged quantity"
+        case .completedDays:
+            "Completed days"
+        case .goalMetDays:
+            "Goal-met days"
+        }
+    }
+
+    func description(for habit: Habit?) -> String {
+        switch self {
+        case .automatic:
+            habit?.isTrackingEnabled == true ? "Each logged unit earns one point." : "Each completed day earns one point."
+        case .loggedQuantity:
+            "Each logged unit earns one point."
+        case .completedDays:
+            "Each completed day earns one point."
+        case .goalMetDays:
+            "Each day that reaches the habit goal earns one point."
+        }
+    }
+}
+
 struct Reward: Identifiable {
     let id: UUID
     var name: String
@@ -108,8 +147,11 @@ struct Reward: Identifiable {
     var linkedHabitID: UUID?
     var startDate: Date
     var endDate: Date?
+    var linkedProgressRule: RewardProgressRule
     var manualStampEntries: [RewardStampEntry]
     var isArchived: Bool
+    var claimedAt: Date?
+    var claimDates: [Date]
 
     init(
         id: UUID = UUID(),
@@ -118,8 +160,11 @@ struct Reward: Identifiable {
         linkedHabitID: UUID? = nil,
         startDate: Date = Date(),
         endDate: Date? = nil,
+        linkedProgressRule: RewardProgressRule = .automatic,
         manualStampEntries: [RewardStampEntry] = [],
-        isArchived: Bool = false
+        isArchived: Bool = false,
+        claimedAt: Date? = nil,
+        claimDates: [Date] = []
     ) {
         self.id = id
         self.name = name
@@ -127,8 +172,11 @@ struct Reward: Identifiable {
         self.linkedHabitID = linkedHabitID
         self.startDate = startDate
         self.endDate = endDate
+        self.linkedProgressRule = linkedProgressRule
         self.manualStampEntries = manualStampEntries
         self.isArchived = isArchived
+        self.claimedAt = claimedAt
+        self.claimDates = claimDates.isEmpty ? claimedAt.map { [$0] } ?? [] : claimDates
     }
 }
 
@@ -144,22 +192,71 @@ func rewardStampCount(for reward: Reward, habits: [Habit]) -> Int {
     }
 
     return habits.first(where: { $0.id == linkedHabitID }).map {
-        linkedRewardProgress(for: $0, startDate: rewardStartDate, calendar: calendar)
+        linkedRewardProgress(for: $0, startDate: rewardStartDate, rule: reward.linkedProgressRule, calendar: calendar)
     } ?? 0
 }
 
-func linkedRewardProgress(for habit: Habit, startDate: Date, calendar: Calendar = Calendar(identifier: .gregorian)) -> Int {
-    if habit.isTrackingEnabled {
+func linkedRewardProgress(
+    for habit: Habit,
+    startDate: Date,
+    rule: RewardProgressRule = .automatic,
+    calendar: Calendar = Calendar(identifier: .gregorian)
+) -> Int {
+    let resolvedRule: RewardProgressRule = rule == .automatic
+        ? (habit.isTrackingEnabled ? .loggedQuantity : .completedDays)
+        : rule
+
+    switch resolvedRule {
+    case .automatic:
+        return 0
+    case .loggedQuantity:
         return habit.timeEntries.reduce(0) { partialResult, entry in
             let entryDate = calendar.startOfDay(for: entry.loggedAt)
             return entryDate >= startDate ? partialResult + entry.minutes : partialResult
         }
+    case .completedDays:
+        return rewardCompletedDayKeys(for: habit).reduce(0) { partialResult, key in
+            guard let day = rewardDate(from: key, calendar: calendar) else { return partialResult }
+            return day >= startDate ? partialResult + 1 : partialResult
+        }
+    case .goalMetDays:
+        guard let goal = habit.goal else { return 0 }
+        let quantitiesByDay = Dictionary(grouping: habit.timeEntries) { entry in
+            "\(entry.year)-\(entry.month)-\(entry.day)"
+        }
+
+        return quantitiesByDay.reduce(0) { partialResult, item in
+            guard let day = rewardDate(from: item.key, calendar: calendar), day >= startDate else {
+                return partialResult
+            }
+            let quantity = item.value.reduce(0) { $0 + $1.minutes }
+            return quantity >= goal.dailyTarget ? partialResult + 1 : partialResult
+        }
+    }
+}
+
+func rewardCompletedDayKeys(for habit: Habit) -> Set<String> {
+    let restDayKeys = Set(habit.restDays.map(\.id))
+    var completedDayKeys = habit.completedDays.subtracting(restDayKeys)
+
+    guard habit.isTrackingEnabled else { return completedDayKeys }
+
+    let quantitiesByDay = Dictionary(grouping: habit.timeEntries) {
+        "\($0.year)-\($0.month)-\($0.day)"
     }
 
-    return habit.completedDays.reduce(0) { partialResult, key in
-        guard let day = rewardDate(from: key, calendar: calendar) else { return partialResult }
-        return day >= startDate ? partialResult + 1 : partialResult
+    for (key, entries) in quantitiesByDay where !restDayKeys.contains(key) {
+        let quantity = entries.reduce(0) { $0 + $1.minutes }
+        if let goal = habit.goal {
+            if quantity >= goal.dailyTarget {
+                completedDayKeys.insert(key)
+            }
+        } else if quantity > 0 {
+            completedDayKeys.insert(key)
+        }
     }
+
+    return completedDayKeys
 }
 
 func rewardDate(from dayKey: String, calendar: Calendar = Calendar(identifier: .gregorian)) -> Date? {
@@ -169,14 +266,111 @@ func rewardDate(from dayKey: String, calendar: Calendar = Calendar(identifier: .
     return calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
 }
 
+struct RewardHistoryEntry: Identifiable {
+    let id: String
+    let date: Date
+    let amount: Int
+    let detail: String
+}
+
+func rewardHistoryEntries(
+    for reward: Reward,
+    habits: [Habit],
+    calendar: Calendar = Calendar(identifier: .gregorian)
+) -> [RewardHistoryEntry] {
+    let startDate = calendar.startOfDay(for: reward.startDate)
+    var entries: [RewardHistoryEntry] = reward.manualStampEntries.compactMap { entry in
+        guard calendar.startOfDay(for: entry.stampedAt) >= startDate else { return nil }
+        return RewardHistoryEntry(
+            id: "manual-\(entry.id.uuidString)",
+            date: entry.stampedAt,
+            amount: entry.amount,
+            detail: "Manual points"
+        )
+    }
+
+    if let linkedHabitID = reward.linkedHabitID,
+       let habit = habits.first(where: { $0.id == linkedHabitID }) {
+        let resolvedRule: RewardProgressRule = reward.linkedProgressRule == .automatic
+            ? (habit.isTrackingEnabled ? .loggedQuantity : .completedDays)
+            : reward.linkedProgressRule
+
+        switch resolvedRule {
+        case .automatic:
+            break
+        case .loggedQuantity:
+            entries += habit.timeEntries.compactMap { entry in
+                guard calendar.startOfDay(for: entry.loggedAt) >= startDate else { return nil }
+                return RewardHistoryEntry(
+                    id: "quantity-\(entry.id)",
+                    date: entry.loggedAt,
+                    amount: entry.minutes,
+                    detail: "\(habit.name) logged"
+                )
+            }
+        case .completedDays:
+            entries += rewardCompletedDayKeys(for: habit).compactMap { key in
+                guard let date = rewardDate(from: key, calendar: calendar), date >= startDate else { return nil }
+                return RewardHistoryEntry(
+                    id: "completion-\(habit.id.uuidString)-\(key)",
+                    date: date,
+                    amount: 1,
+                    detail: "\(habit.name) completed"
+                )
+            }
+        case .goalMetDays:
+            guard let goal = habit.goal else { break }
+            let quantitiesByDay = Dictionary(grouping: habit.timeEntries) {
+                "\($0.year)-\($0.month)-\($0.day)"
+            }
+            entries += quantitiesByDay.compactMap { key, dayEntries in
+                guard
+                    let date = rewardDate(from: key, calendar: calendar),
+                    date >= startDate,
+                    dayEntries.reduce(0, { $0 + $1.minutes }) >= goal.dailyTarget
+                else { return nil }
+
+                return RewardHistoryEntry(
+                    id: "goal-\(habit.id.uuidString)-\(key)",
+                    date: date,
+                    amount: 1,
+                    detail: "\(habit.name) goal met"
+                )
+            }
+        }
+    }
+
+    entries += reward.claimDates.map { claimedAt in
+        RewardHistoryEntry(
+            id: "claimed-\(reward.id.uuidString)-\(claimedAt.timeIntervalSinceReferenceDate)",
+            date: claimedAt,
+            amount: 0,
+            detail: "Reward claimed"
+        )
+    }
+
+    if let claimedAt = reward.claimedAt, !reward.claimDates.contains(claimedAt) {
+        entries.append(
+            RewardHistoryEntry(
+                id: "claimed-\(reward.id.uuidString)",
+                date: claimedAt,
+                amount: 0,
+                detail: "Reward claimed"
+            )
+        )
+    }
+
+    return entries.sorted { $0.date > $1.date }
+}
+
 struct MockData {
     static let habits: [Habit] = {
         let calendar = Calendar(identifier: .gregorian)
-        let specs: [(id: UUID, name: String, symbolName: String, color: Color, isTrackingEnabled: Bool, trackingUnit: String, goal: HabitGoal?, seed: UInt64)] = [
-            (UUID(uuidString: "11111111-1111-1111-1111-111111111111")!, "Strength", "dumbbell.fill", .red, false, "", nil, 11),
-            (UUID(uuidString: "22222222-2222-2222-2222-222222222222")!, "Reading", "book.closed.fill", .green, true, "pages", nil, 22),
-            (UUID(uuidString: "33333333-3333-3333-3333-333333333333")!, "Meditation", "brain.head.profile", .purple, false, "", nil, 33),
-            (UUID(uuidString: "44444444-4444-4444-4444-444444444444")!, "Running", "figure.run", .blue, true, "km", HabitGoal(unit: "km", dailyTarget: 5), 44)
+        let specs: [(id: UUID, name: String, symbolName: String, color: Color, createdAt: DateComponents, isTrackingEnabled: Bool, trackingUnit: String, goal: HabitGoal?, seed: UInt64)] = [
+            (UUID(uuidString: "11111111-1111-1111-1111-111111111111")!, "Strength", "dumbbell.fill", .red, DateComponents(year: 2026, month: 1, day: 12), false, "", nil, 11),
+            (UUID(uuidString: "22222222-2222-2222-2222-222222222222")!, "Reading", "book.closed.fill", .green, DateComponents(year: 2026, month: 2, day: 3), true, "pages", nil, 22),
+            (UUID(uuidString: "33333333-3333-3333-3333-333333333333")!, "Meditation", "brain.head.profile", .purple, DateComponents(year: 2026, month: 3, day: 18), false, "", nil, 33),
+            (UUID(uuidString: "44444444-4444-4444-4444-444444444444")!, "Running", "figure.run", .yellow, DateComponents(year: 2026, month: 4, day: 7), true, "km", HabitGoal(unit: "km", dailyTarget: 5), 44)
         ]
 
         guard
@@ -184,12 +378,14 @@ struct MockData {
             let endDate = calendar.date(from: DateComponents(year: 2026, month: 6, day: 2))
         else { return [] }
 
-        return specs.map { spec in
+        return specs.compactMap { spec in
+            guard let createdAt = calendar.date(from: spec.createdAt) else { return nil }
+
             var generator = SeededGenerator(seed: spec.seed)
             var completedDays = Set<String>()
             var restDays: [RestDay] = []
             var timeEntries: [TimeEntry] = []
-            var currentDate = startDate
+            var currentDate = max(startDate, createdAt)
 
             while currentDate <= endDate {
                 let components = calendar.dateComponents([.year, .month, .day], from: currentDate)
@@ -251,6 +447,7 @@ struct MockData {
                 name: spec.name,
                 symbolName: spec.symbolName,
                 color: spec.color,
+                createdAt: createdAt,
                 isTrackingEnabled: spec.isTrackingEnabled,
                 trackingUnit: spec.trackingUnit,
                 goal: spec.goal,
@@ -261,9 +458,276 @@ struct MockData {
         }
     }()
 
+    static let rewards: [Reward] = {
+        let calendar = Calendar(identifier: .gregorian)
+
+        return [
+            Reward(
+                id: UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!,
+                name: "Fresh Notebook",
+                stampTarget: 120,
+                linkedHabitID: UUID(uuidString: "22222222-2222-2222-2222-222222222222"),
+                startDate: calendar.date(from: DateComponents(year: 2026, month: 2, day: 3)) ?? Date()
+            ),
+            Reward(
+                id: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!,
+                name: "Massage Voucher",
+                stampTarget: 8,
+                startDate: calendar.date(from: DateComponents(year: 2026, month: 3, day: 1)) ?? Date(),
+                manualStampEntries: [
+                    RewardStampEntry(
+                        id: UUID(uuidString: "12121212-1212-1212-1212-121212121212")!,
+                        stampedAt: calendar.date(from: DateComponents(year: 2026, month: 3, day: 8)) ?? Date(),
+                        amount: 2
+                    ),
+                    RewardStampEntry(
+                        id: UUID(uuidString: "34343434-3434-3434-3434-343434343434")!,
+                        stampedAt: calendar.date(from: DateComponents(year: 2026, month: 4, day: 9)) ?? Date(),
+                        amount: 3
+                    )
+                ]
+            ),
+            Reward(
+                id: UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!,
+                name: "Race Day Entry",
+                stampTarget: 30,
+                linkedHabitID: UUID(uuidString: "44444444-4444-4444-4444-444444444444"),
+                startDate: calendar.date(from: DateComponents(year: 2026, month: 4, day: 7)) ?? Date(),
+                linkedProgressRule: .goalMetDays
+            )
+        ]
+    }()
+
     private static func dayKey(for day: Date, calendar: Calendar) -> String {
         let components = calendar.dateComponents([.year, .month, .day], from: day)
         return "\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
+    }
+}
+
+private enum AppStorageKeys {
+    static let developerModeEnabled = "developerModeEnabled"
+    static let mockDataset = "mockDataset"
+    static let realDataset = "realDataset"
+}
+
+private enum DataMode {
+    case mock
+    case real
+}
+
+private struct CodableColor: Codable {
+    let red: Double
+    let green: Double
+    let blue: Double
+    let alpha: Double
+}
+
+private struct StoredHabitGoal: Codable {
+    let unit: String
+    let dailyTarget: Int
+
+    init(_ goal: HabitGoal) {
+        unit = goal.unit
+        dailyTarget = goal.dailyTarget
+    }
+
+    var value: HabitGoal {
+        HabitGoal(unit: unit, dailyTarget: dailyTarget)
+    }
+}
+
+private struct StoredRestDay: Codable {
+    let id: String
+    let markedAt: Date
+    let year: Int
+    let month: Int
+    let day: Int
+
+    init(_ restDay: RestDay) {
+        id = restDay.id
+        markedAt = restDay.markedAt
+        year = restDay.year
+        month = restDay.month
+        day = restDay.day
+    }
+
+    var value: RestDay {
+        RestDay(id: id, markedAt: markedAt, year: year, month: month, day: day)
+    }
+}
+
+private struct StoredTimeEntry: Codable {
+    let id: String
+    let loggedAt: Date
+    let year: Int
+    let month: Int
+    let day: Int
+    let minutes: Int
+    let unitLabel: String
+    let dailyTarget: Int?
+
+    init(_ timeEntry: TimeEntry) {
+        id = timeEntry.id
+        loggedAt = timeEntry.loggedAt
+        year = timeEntry.year
+        month = timeEntry.month
+        day = timeEntry.day
+        minutes = timeEntry.minutes
+        unitLabel = timeEntry.unitLabel
+        dailyTarget = timeEntry.dailyTarget
+    }
+
+    var value: TimeEntry {
+        TimeEntry(
+            id: id,
+            loggedAt: loggedAt,
+            year: year,
+            month: month,
+            day: day,
+            minutes: minutes,
+            unitLabel: unitLabel,
+            dailyTarget: dailyTarget
+        )
+    }
+}
+
+private struct StoredRewardStampEntry: Codable {
+    let id: UUID
+    let stampedAt: Date
+    let amount: Int
+
+    init(_ entry: RewardStampEntry) {
+        id = entry.id
+        stampedAt = entry.stampedAt
+        amount = entry.amount
+    }
+
+    var value: RewardStampEntry {
+        RewardStampEntry(id: id, stampedAt: stampedAt, amount: amount)
+    }
+}
+
+private struct StoredHabit: Codable {
+    let id: UUID
+    let name: String
+    let symbolName: String
+    let color: CodableColor
+    let createdAt: Date
+    let isTrackingEnabled: Bool
+    let trackingUnit: String
+    let goal: StoredHabitGoal?
+    let completedDays: Set<String>
+    let restDays: [StoredRestDay]
+    let timeEntries: [StoredTimeEntry]
+
+    init(_ habit: Habit) {
+        id = habit.id
+        name = habit.name
+        symbolName = habit.symbolName
+        color = habit.color.codableColor
+        createdAt = habit.createdAt
+        isTrackingEnabled = habit.isTrackingEnabled
+        trackingUnit = habit.trackingUnit
+        goal = habit.goal.map { StoredHabitGoal($0) }
+        completedDays = habit.completedDays
+        restDays = habit.restDays.map { StoredRestDay($0) }
+        timeEntries = habit.timeEntries.map { StoredTimeEntry($0) }
+    }
+
+    var value: Habit {
+        Habit(
+            id: id,
+            name: name,
+            symbolName: symbolName,
+            color: Color(codableColor: color),
+            createdAt: createdAt,
+            isTrackingEnabled: isTrackingEnabled,
+            trackingUnit: trackingUnit,
+            goal: goal?.value,
+            completedDays: completedDays,
+            restDays: restDays.map(\.value),
+            timeEntries: timeEntries.map(\.value)
+        )
+    }
+}
+
+private struct StoredReward: Codable {
+    let id: UUID
+    let name: String
+    let stampTarget: Int
+    let linkedHabitID: UUID?
+    let startDate: Date
+    let endDate: Date?
+    let linkedProgressRule: RewardProgressRule?
+    let manualStampEntries: [StoredRewardStampEntry]
+    let isArchived: Bool
+    let claimedAt: Date?
+    let claimDates: [Date]?
+
+    init(_ reward: Reward) {
+        id = reward.id
+        name = reward.name
+        stampTarget = reward.stampTarget
+        linkedHabitID = reward.linkedHabitID
+        startDate = reward.startDate
+        endDate = reward.endDate
+        linkedProgressRule = reward.linkedProgressRule
+        manualStampEntries = reward.manualStampEntries.map { StoredRewardStampEntry($0) }
+        isArchived = reward.isArchived
+        claimedAt = reward.claimedAt
+        claimDates = reward.claimDates
+    }
+
+    var value: Reward {
+        Reward(
+            id: id,
+            name: name,
+            stampTarget: stampTarget,
+            linkedHabitID: linkedHabitID,
+            startDate: startDate,
+            endDate: endDate,
+            linkedProgressRule: linkedProgressRule ?? .automatic,
+            manualStampEntries: manualStampEntries.map(\.value),
+            isArchived: isArchived,
+            claimedAt: claimedAt,
+            claimDates: claimDates ?? []
+        )
+    }
+}
+
+private struct StoredDataset: Codable {
+    let habits: [StoredHabit]
+    let rewards: [StoredReward]
+}
+
+private extension Color {
+    init(codableColor: CodableColor) {
+        self = Color(
+            .sRGB,
+            red: codableColor.red,
+            green: codableColor.green,
+            blue: codableColor.blue,
+            opacity: codableColor.alpha
+        )
+    }
+
+    var codableColor: CodableColor {
+        let uiColor = UIColor(self)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+
+        if uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            return CodableColor(
+                red: Double(red),
+                green: Double(green),
+                blue: Double(blue),
+                alpha: Double(alpha)
+            )
+        }
+
+        return CodableColor(red: 0, green: 1, blue: 0, alpha: 1)
     }
 }
 
@@ -281,8 +745,11 @@ struct SeededGenerator {
 }
 
 struct ContentView: View {
-    @State private var habits: [Habit] = MockData.habits
-    @State private var rewards: [Reward] = []
+    @State private var isDeveloperModeEnabled: Bool
+    @State private var mockHabits: [Habit]
+    @State private var mockRewards: [Reward]
+    @State private var realHabits: [Habit]
+    @State private var realRewards: [Reward]
     @State private var isShowingAddHabit = false
     @State private var newHabitName = ""
     @State private var newHabitSymbolName = HabitSymbolOption.defaultSymbolName
@@ -301,12 +768,33 @@ struct ContentView: View {
     @State private var newRewardHasCustomStartDate = false
     @State private var newRewardEndDate = Date()
     @State private var newRewardHasDeadline = false
+    @State private var newRewardProgressRule = RewardProgressRule.automatic
+    @State private var editingRewardID: UUID?
     @State private var selectedBulkStampRewardID: UUID?
     @State private var bulkStampAmount = ""
     @State private var highlightedRewardID: UUID?
     @State private var celebratingRewardID: UUID?
 
     private let calendar = Calendar(identifier: .gregorian)
+    private let storage: UserDefaults
+
+    init(
+        storage: UserDefaults = .standard,
+        developerModeOverride: Bool? = nil,
+        usePersistedDatasets: Bool = true
+    ) {
+        self.storage = storage
+
+        let storedDeveloperModeEnabled = storage.object(forKey: AppStorageKeys.developerModeEnabled) as? Bool ?? true
+        let storedMockDataset = usePersistedDatasets ? Self.loadDataset(forKey: AppStorageKeys.mockDataset, storage: storage) : nil
+        let storedRealDataset = usePersistedDatasets ? Self.loadDataset(forKey: AppStorageKeys.realDataset, storage: storage) : nil
+
+        _isDeveloperModeEnabled = State(initialValue: developerModeOverride ?? storedDeveloperModeEnabled)
+        _mockHabits = State(initialValue: storedMockDataset?.habits.map(\.value) ?? MockData.habits)
+        _mockRewards = State(initialValue: storedMockDataset?.rewards.map(\.value) ?? MockData.rewards)
+        _realHabits = State(initialValue: storedRealDataset?.habits.map(\.value) ?? [])
+        _realRewards = State(initialValue: storedRealDataset?.rewards.map(\.value) ?? [])
+    }
 
     var body: some View {
         TabView {
@@ -322,10 +810,11 @@ struct ContentView: View {
 
                         ScrollView {
                             LazyVStack(spacing: rowSpacing) {
-                                ForEach($habits) { $habit in
+                                ForEach(activeHabitsBinding) { $habit in
                                     HabitRow(
                                         habit: $habit,
                                         days: daysIn2026,
+                                        expandedHeight: cardHeight,
                                         todayKey: dayKey(for: today),
                                         isFutureDay: { day in day > today },
                                         dayKey: dayKey(for:),
@@ -334,7 +823,6 @@ struct ContentView: View {
                                         onEdit: editHabit(_:),
                                         onDelete: deleteHabit(_:)
                                     )
-                                    .frame(height: cardHeight)
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -377,14 +865,15 @@ struct ContentView: View {
                 Label("Habits", systemImage: "checkmark.square")
             }
 
-            StatsView(habits: habits, rewards: rewards)
+            StatsView(habits: activeHabits, rewards: activeRewards)
                 .tabItem {
                     Label("Stats", systemImage: "chart.bar")
                 }
 
             RewardsView(
-                rewards: $rewards,
-                habits: habits,
+                rewards: activeRewardsBinding,
+                habits: activeHabits,
+                isEditingReward: editingRewardID != nil,
                 isShowingAddReward: $isShowingAddReward,
                 newRewardName: $newRewardName,
                 newRewardTarget: $newRewardTarget,
@@ -393,22 +882,68 @@ struct ContentView: View {
                 newRewardHasCustomStartDate: $newRewardHasCustomStartDate,
                 newRewardEndDate: $newRewardEndDate,
                 newRewardHasDeadline: $newRewardHasDeadline,
+                newRewardProgressRule: $newRewardProgressRule,
                 selectedBulkStampRewardID: $selectedBulkStampRewardID,
                 bulkStampAmount: $bulkStampAmount,
                 highlightedRewardID: $highlightedRewardID,
                 celebratingRewardID: $celebratingRewardID,
                 onStartAddingReward: startAddingReward,
+                onEditReward: editReward(_:),
+                onDeleteReward: deleteReward(_:),
                 onCancelRewardModal: cancelRewardModal,
                 onSaveReward: saveReward,
                 onRewardTap: handleRewardTap(_:),
                 onConfirmBulkStamp: confirmBulkStamp,
-                onClaimReward: claimReward(_:)
+                onClaimReward: claimReward(_:),
+                onRestoreReward: restoreReward(_:)
             )
             .tabItem {
                 Label("Rewards", systemImage: "gift.fill")
             }
+
+            SettingsView(isDeveloperModeEnabled: developerModeBinding)
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var currentDataMode: DataMode {
+        isDeveloperModeEnabled ? .mock : .real
+    }
+
+    private var activeHabits: [Habit] {
+        habits(for: currentDataMode)
+    }
+
+    private var activeRewards: [Reward] {
+        rewards(for: currentDataMode)
+    }
+
+    private var activeHabitsBinding: Binding<[Habit]> {
+        Binding(
+            get: { habits(for: currentDataMode) },
+            set: { setHabits($0, for: currentDataMode) }
+        )
+    }
+
+    private var activeRewardsBinding: Binding<[Reward]> {
+        Binding(
+            get: { rewards(for: currentDataMode) },
+            set: { setRewards($0, for: currentDataMode) }
+        )
+    }
+
+    private var developerModeBinding: Binding<Bool> {
+        Binding(
+            get: { isDeveloperModeEnabled },
+            set: { newValue in
+                isDeveloperModeEnabled = newValue
+                storage.set(newValue, forKey: AppStorageKeys.developerModeEnabled)
+                resetTransientState()
+            }
+        )
     }
 
     private var today: Date {
@@ -469,15 +1004,18 @@ struct ContentView: View {
         let isTrackingEnabled = newHabitIsTrackingEnabled || goal != nil
         let trackingUnit = goal?.unit ?? (isTrackingEnabled ? trimmedTrackingUnit : "")
 
-        if let editingHabitID, let habitIndex = habits.firstIndex(where: { $0.id == editingHabitID }) {
-            habits[habitIndex].name = trimmedName
-            habits[habitIndex].symbolName = newHabitSymbolName
-            habits[habitIndex].color = newHabitColor
-            habits[habitIndex].isTrackingEnabled = isTrackingEnabled
-            habits[habitIndex].trackingUnit = trackingUnit
-            habits[habitIndex].goal = goal
+        let dataMode = currentDataMode
+        var updatedHabits = habits(for: dataMode)
+
+        if let editingHabitID, let habitIndex = updatedHabits.firstIndex(where: { $0.id == editingHabitID }) {
+            updatedHabits[habitIndex].name = trimmedName
+            updatedHabits[habitIndex].symbolName = newHabitSymbolName
+            updatedHabits[habitIndex].color = newHabitColor
+            updatedHabits[habitIndex].isTrackingEnabled = isTrackingEnabled
+            updatedHabits[habitIndex].trackingUnit = trackingUnit
+            updatedHabits[habitIndex].goal = goal
         } else {
-            habits.append(
+            updatedHabits.append(
                 Habit(
                     name: trimmedName,
                     symbolName: newHabitSymbolName,
@@ -488,6 +1026,8 @@ struct ContentView: View {
                 )
             )
         }
+
+        setHabits(updatedHabits, for: dataMode)
 
         resetNewHabit()
         isShowingAddHabit = false
@@ -511,7 +1051,10 @@ struct ContentView: View {
     }
 
     private func deleteHabit(_ habitID: UUID) {
-        habits.removeAll { $0.id == habitID }
+        let dataMode = currentDataMode
+        var updatedHabits = habits(for: dataMode)
+        updatedHabits.removeAll { $0.id == habitID }
+        setHabits(updatedHabits, for: dataMode)
     }
 
     private func makeRestDay(day: Date) -> RestDay {
@@ -546,21 +1089,49 @@ struct ContentView: View {
         isShowingAddReward = true
     }
 
+    private func editReward(_ reward: Reward) {
+        editingRewardID = reward.id
+        newRewardName = reward.name
+        newRewardTarget = "\(reward.stampTarget)"
+        newRewardLinkedHabitID = reward.linkedHabitID
+        newRewardStartDate = reward.startDate
+        newRewardHasCustomStartDate = true
+        newRewardEndDate = reward.endDate ?? today
+        newRewardHasDeadline = reward.endDate != nil
+        newRewardProgressRule = reward.linkedProgressRule
+        isShowingAddReward = true
+    }
+
     private func saveReward() {
         let trimmedName = newRewardName.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = Int(newRewardTarget.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
 
         guard !trimmedName.isEmpty, target > 0 else { return }
 
-        rewards.append(
-            Reward(
-                name: trimmedName,
-                stampTarget: target,
-                linkedHabitID: newRewardLinkedHabitID,
-                startDate: calendar.startOfDay(for: newRewardStartDate),
-                endDate: newRewardHasDeadline ? calendar.startOfDay(for: newRewardEndDate) : nil
+        let dataMode = currentDataMode
+        var updatedRewards = rewards(for: dataMode)
+
+        if let editingRewardID, let rewardIndex = updatedRewards.firstIndex(where: { $0.id == editingRewardID }) {
+            updatedRewards[rewardIndex].name = trimmedName
+            updatedRewards[rewardIndex].stampTarget = target
+            updatedRewards[rewardIndex].linkedHabitID = newRewardLinkedHabitID
+            updatedRewards[rewardIndex].startDate = calendar.startOfDay(for: newRewardStartDate)
+            updatedRewards[rewardIndex].endDate = newRewardHasDeadline ? calendar.startOfDay(for: newRewardEndDate) : nil
+            updatedRewards[rewardIndex].linkedProgressRule = newRewardLinkedHabitID == nil ? .automatic : newRewardProgressRule
+        } else {
+            updatedRewards.append(
+                Reward(
+                    name: trimmedName,
+                    stampTarget: target,
+                    linkedHabitID: newRewardLinkedHabitID,
+                    startDate: calendar.startOfDay(for: newRewardStartDate),
+                    endDate: newRewardHasDeadline ? calendar.startOfDay(for: newRewardEndDate) : nil,
+                    linkedProgressRule: newRewardLinkedHabitID == nil ? .automatic : newRewardProgressRule
+                )
             )
-        )
+        }
+
+        setRewards(updatedRewards, for: dataMode)
 
         resetNewReward()
         isShowingAddReward = false
@@ -574,6 +1145,8 @@ struct ContentView: View {
         newRewardHasCustomStartDate = false
         newRewardEndDate = today
         newRewardHasDeadline = false
+        newRewardProgressRule = .automatic
+        editingRewardID = nil
     }
 
     private func cancelRewardModal() {
@@ -581,9 +1154,18 @@ struct ContentView: View {
         isShowingAddReward = false
     }
 
+    private func deleteReward(_ rewardID: UUID) {
+        let dataMode = currentDataMode
+        var updatedRewards = rewards(for: dataMode)
+        updatedRewards.removeAll { $0.id == rewardID }
+        setRewards(updatedRewards, for: dataMode)
+    }
+
     private func handleRewardTap(_ reward: Reward) {
+        let dataMode = currentDataMode
+
         guard reward.linkedHabitID == nil else { return }
-        guard rewardStampCount(for: reward, habits: habits) < reward.stampTarget else { return }
+        guard rewardStampCount(for: reward, habits: habits(for: dataMode)) < reward.stampTarget else { return }
 
         if reward.stampTarget > 10 {
             bulkStampAmount = ""
@@ -591,22 +1173,24 @@ struct ContentView: View {
             return
         }
 
-        addManualStamps(to: reward.id, amount: 1)
+        addManualStamps(to: reward.id, amount: 1, in: dataMode)
     }
 
     private func confirmBulkStamp() {
         let amount = Int(bulkStampAmount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         guard let selectedBulkStampRewardID, amount > 0 else { return }
 
-        addManualStamps(to: selectedBulkStampRewardID, amount: amount)
+        addManualStamps(to: selectedBulkStampRewardID, amount: amount, in: currentDataMode)
         bulkStampAmount = ""
         self.selectedBulkStampRewardID = nil
     }
 
-    private func addManualStamps(to rewardID: UUID, amount: Int) {
-        guard let rewardIndex = rewards.firstIndex(where: { $0.id == rewardID }) else { return }
+    private func addManualStamps(to rewardID: UUID, amount: Int, in dataMode: DataMode) {
+        var updatedRewards = rewards(for: dataMode)
+        guard let rewardIndex = updatedRewards.firstIndex(where: { $0.id == rewardID }) else { return }
 
-        rewards[rewardIndex].manualStampEntries.append(RewardStampEntry(amount: amount))
+        updatedRewards[rewardIndex].manualStampEntries.append(RewardStampEntry(amount: amount))
+        setRewards(updatedRewards, for: dataMode)
         highlightedRewardID = rewardID
 
         withAnimation(.easeOut(duration: 0.22)) {
@@ -623,20 +1207,125 @@ struct ContentView: View {
     }
 
     private func claimReward(_ reward: Reward) {
-        guard rewardStampCount(for: reward, habits: habits) >= reward.stampTarget else { return }
+        let dataMode = currentDataMode
+        guard rewardStampCount(for: reward, habits: habits(for: dataMode)) >= reward.stampTarget else { return }
 
         withAnimation(.spring(response: 0.42, dampingFraction: 0.7)) {
             celebratingRewardID = reward.id
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            guard let rewardIndex = rewards.firstIndex(where: { $0.id == reward.id }) else { return }
+            var updatedRewards = rewards(for: dataMode)
+            guard let rewardIndex = updatedRewards.firstIndex(where: { $0.id == reward.id }) else { return }
 
             withAnimation(.easeInOut(duration: 0.28)) {
-                rewards[rewardIndex].isArchived = true
+                updatedRewards[rewardIndex].isArchived = true
+                let claimedAt = Date()
+                updatedRewards[rewardIndex].claimedAt = claimedAt
+                updatedRewards[rewardIndex].claimDates.append(claimedAt)
+                setRewards(updatedRewards, for: dataMode)
             }
 
             celebratingRewardID = nil
+        }
+    }
+
+    private func restoreReward(_ reward: Reward) {
+        let dataMode = currentDataMode
+        var updatedRewards = rewards(for: dataMode)
+        guard let rewardIndex = updatedRewards.firstIndex(where: { $0.id == reward.id }) else { return }
+
+        updatedRewards[rewardIndex].isArchived = false
+        updatedRewards[rewardIndex].claimedAt = nil
+        setRewards(updatedRewards, for: dataMode)
+    }
+
+    private func habits(for dataMode: DataMode) -> [Habit] {
+        switch dataMode {
+        case .mock:
+            mockHabits
+        case .real:
+            realHabits
+        }
+    }
+
+    private func rewards(for dataMode: DataMode) -> [Reward] {
+        switch dataMode {
+        case .mock:
+            mockRewards
+        case .real:
+            realRewards
+        }
+    }
+
+    private func setHabits(_ habits: [Habit], for dataMode: DataMode) {
+        switch dataMode {
+        case .mock:
+            mockHabits = habits
+            persistDataset(for: .mock)
+        case .real:
+            realHabits = habits
+            persistDataset(for: .real)
+        }
+    }
+
+    private func setRewards(_ rewards: [Reward], for dataMode: DataMode) {
+        switch dataMode {
+        case .mock:
+            mockRewards = rewards
+            persistDataset(for: .mock)
+        case .real:
+            realRewards = rewards
+            persistDataset(for: .real)
+        }
+    }
+
+    private func persistDataset(for dataMode: DataMode) {
+        let dataset = StoredDataset(
+            habits: habits(for: dataMode).map { StoredHabit($0) },
+            rewards: rewards(for: dataMode).map { StoredReward($0) }
+        )
+
+        guard let encodedDataset = try? JSONEncoder().encode(dataset) else { return }
+
+        let key = switch dataMode {
+        case .mock:
+            AppStorageKeys.mockDataset
+        case .real:
+            AppStorageKeys.realDataset
+        }
+
+        storage.set(encodedDataset, forKey: key)
+    }
+
+    private func resetTransientState() {
+        resetNewHabit()
+        isShowingAddHabit = false
+        resetNewReward()
+        isShowingAddReward = false
+        selectedBulkStampRewardID = nil
+        bulkStampAmount = ""
+        highlightedRewardID = nil
+        celebratingRewardID = nil
+    }
+
+    private static func loadDataset(forKey key: String, storage: UserDefaults = .standard) -> StoredDataset? {
+        guard let storedData = storage.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(StoredDataset.self, from: storedData)
+    }
+}
+
+struct SettingsView: View {
+    @Binding var isDeveloperModeEnabled: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Toggle("Developer Mode", isOn: $isDeveloperModeEnabled)
+            }
+            .scrollContentBackground(.hidden)
+            .background(Color.black)
+            .navigationTitle("Settings")
         }
     }
 }
@@ -645,6 +1334,7 @@ struct HabitRow: View {
     @Binding var habit: Habit
 
     let days: [Date]
+    let expandedHeight: CGFloat
     let todayKey: String
     let isFutureDay: (Date) -> Bool
     let dayKey: (Date) -> String
@@ -654,60 +1344,87 @@ struct HabitRow: View {
     let onDelete: (UUID) -> Void
 
     @State private var isShowingTimeEntry = false
+    @State private var isShowingHistory = false
     @State private var shouldMarkCompleteOnSave = false
     @State private var sessionMinutes = 0
     @State private var manualTimeInput = ""
+    @State private var isCollapsed = false
 
-    private let squareSize: CGFloat = 10
-    private let squareSpacing: CGFloat = 4
-    private let checkboxSize: CGFloat = 30
-    private let saveButtonSize: CGFloat = 30
+    private let calendar = Calendar(identifier: .gregorian)
+
+    private var squareSize: CGFloat { isCollapsed ? 8 : 10 }
+    private var squareSpacing: CGFloat { isCollapsed ? 3 : 4 }
+    private var checkboxSize: CGFloat { isCollapsed ? 24 : 30 }
+    private var saveButtonSize: CGFloat { isCollapsed ? 24 : 30 }
+    private var horizontalSpacing: CGFloat { isCollapsed ? 10 : 12 }
+    private var cardSpacing: CGFloat { isCollapsed ? 6 : 8 }
+    private var cardPadding: CGFloat { isCollapsed ? 10 : 14 }
+    private var titleFont: Font { isCollapsed ? .callout.weight(.medium) : .body.weight(.medium) }
+    private var symbolFont: Font { isCollapsed ? .callout.weight(.medium) : .body.weight(.medium) }
+    private var compactHeatMapDays: [Date] {
+        Array(days.filter { $0 <= Date() }.suffix(5))
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: cardSpacing) {
+            HStack(spacing: isCollapsed ? 6 : 8) {
                 Image(systemName: habit.symbolName)
-                    .font(.body.weight(.medium))
+                    .font(symbolFont)
                     .foregroundStyle(habit.color)
-                    .frame(width: 18)
+                    .frame(width: isCollapsed ? 16 : 18)
 
                 Text(habit.name)
-                    .font(.body.weight(.medium))
+                    .font(titleFont)
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isShowingHistory = true
+            }
 
-            HStack(alignment: .center, spacing: 12) {
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: squareSpacing) {
-                            ForEach(weekColumns, id: \.start) { column in
-                                VStack(spacing: squareSpacing) {
-                                    ForEach(0..<7, id: \.self) { index in
-                                        if let day = column.days[index] {
-                                            heatMapSquare(for: day)
-                                        } else {
-                                            Color.clear
-                                                .frame(width: squareSize, height: squareSize)
+            HStack(alignment: .center, spacing: horizontalSpacing) {
+                Group {
+                    if isCollapsed {
+                        compactHeatMap
+                    } else {
+                        ScrollViewReader { proxy in
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(alignment: .top, spacing: squareSpacing) {
+                                    ForEach(weekColumns, id: \.start) { column in
+                                        VStack(spacing: squareSpacing) {
+                                            ForEach(0..<7, id: \.self) { index in
+                                                if let day = column.days[index] {
+                                                    heatMapSquare(for: day)
+                                                } else {
+                                                    Color.clear
+                                                        .frame(width: squareSize, height: squareSize)
+                                                }
+                                            }
                                         }
+                                        .id(column.id)
                                     }
                                 }
-                                .id(column.id)
+                                .padding(.vertical, 1)
                             }
-                        }
-                        .padding(.vertical, 1)
-                    }
-                    .onAppear {
-                        guard let currentWeekColumnID else { return }
+                            .onAppear {
+                                guard let currentWeekColumnID else { return }
 
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(currentWeekColumnID, anchor: .trailing)
+                                DispatchQueue.main.async {
+                                    proxy.scrollTo(currentWeekColumnID, anchor: .trailing)
+                                }
+                            }
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isShowingHistory = true
+                }
 
-                VStack(alignment: .trailing, spacing: 8) {
+                VStack(alignment: .trailing, spacing: isCollapsed ? 6 : 8) {
                     Button {
                         handlePrimaryProgressAction()
                     } label: {
@@ -723,7 +1440,7 @@ struct HabitRow: View {
                             isShowingTimeEntry = true
                         } label: {
                             Image(systemName: "plus")
-                                .font(.caption.weight(.bold))
+                                .font(isCollapsed ? .caption2.weight(.bold) : .caption.weight(.bold))
                                 .frame(width: saveButtonSize, height: saveButtonSize)
                         }
                         .buttonStyle(.bordered)
@@ -732,8 +1449,13 @@ struct HabitRow: View {
                 }
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(cardPadding)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isCollapsed ? nil : expandedHeight,
+            maxHeight: isCollapsed ? nil : expandedHeight,
+            alignment: .topLeading
+        )
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.white.opacity(0.07))
@@ -756,12 +1478,19 @@ struct HabitRow: View {
                 Label(isRestToday ? "Unmark Rest Day" : "Mark Day as Rest", systemImage: "moon")
             }
 
+            Button {
+                isCollapsed.toggle()
+            } label: {
+                Label(isCollapsed ? "Expand" : "Collapse", systemImage: isCollapsed ? "arrow.down.left.and.arrow.up.right" : "arrow.up.left.and.arrow.down.right")
+            }
+
             Button(role: .destructive) {
                 onDelete(habit.id)
             } label: {
                 Label("Delete", systemImage: "trash")
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .sheet(isPresented: $isShowingTimeEntry) {
             TimeEntryView(
                 habitName: habit.name,
@@ -775,6 +1504,10 @@ struct HabitRow: View {
                 onSave: saveTimeEntry
             )
             .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $isShowingHistory) {
+            HabitHistorySheet(habit: $habit, initialMonth: calendar.component(.month, from: Date()))
+                .preferredColorScheme(.dark)
         }
     }
 
@@ -874,6 +1607,28 @@ struct HabitRow: View {
     }
 
     private var weekColumns: [WeekColumn] {
+        guard let currentWeekIndex = allWeekColumns.firstIndex(where: { column in
+            column.days.contains { day in
+                guard let day else { return false }
+                return dayKey(day) == todayKey
+            }
+        }) else {
+            return allWeekColumns
+        }
+
+        return Array(allWeekColumns.prefix(through: currentWeekIndex))
+    }
+
+    private var compactHeatMap: some View {
+        HStack(spacing: squareSpacing) {
+            ForEach(compactHeatMapDays, id: \.self) { day in
+                heatMapSquare(for: day)
+            }
+        }
+        .padding(.vertical, 1)
+    }
+
+    private var allWeekColumns: [WeekColumn] {
         guard let firstDay = days.first else { return [] }
 
         let leadingEmptyDays = mondayBasedWeekdayIndex(for: firstDay)
@@ -897,7 +1652,7 @@ struct HabitRow: View {
         let isRest = habit.restDays.contains { $0.id == key }
         let progressRatio = progressRatio(for: key)
         let fillColor = if isRest && !isFutureDay(day) {
-            Color.gray.opacity(0.5)
+            Color.white.opacity(0.12)
         } else if progressRatio > 0 && !isFutureDay(day) {
             habit.color.opacity(progressRatio)
         } else {
@@ -908,8 +1663,16 @@ struct HabitRow: View {
             .fill(fillColor)
             .frame(width: squareSize, height: squareSize)
             .overlay(
-                RoundedRectangle(cornerRadius: 2)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+
+                    if isRest && !isFutureDay(day) {
+                        Image(systemName: "moon")
+                            .font(.system(size: squareSize * 0.6, weight: .thin))
+                            .foregroundStyle(.white.opacity(0.82))
+                    }
+                }
             )
     }
 
@@ -1029,6 +1792,393 @@ struct HabitRow: View {
     }
 }
 
+private struct IdentifiableDay: Identifiable {
+    let date: Date
+
+    var id: Date { date }
+}
+
+struct HabitHistorySheet: View {
+    @Binding var habit: Habit
+
+    @State private var selectedMonth: Int
+    @State private var selectedDay: IdentifiableDay?
+
+    private let calendar = Calendar(identifier: .gregorian)
+    private let today: Date
+
+    init(habit: Binding<Habit>, initialMonth: Int) {
+        _habit = habit
+        _selectedMonth = State(initialValue: initialMonth)
+        today = Calendar(identifier: .gregorian).startOfDay(for: Date())
+    }
+
+    var body: some View {
+        let stats = HabitStatsCalculator(habit: habit, today: today, calendar: calendar)
+
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        HStack {
+                            Button {
+                                selectedMonth -= 1
+                            } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.headline.weight(.semibold))
+                                    .frame(width: 36, height: 36)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(selectedMonth == 1)
+
+                            Spacer()
+
+                            VStack(spacing: 4) {
+                                Text(stats.monthName(for: selectedMonth, style: .wide))
+                                    .font(.title3.weight(.bold))
+                                    .foregroundStyle(.white)
+
+                                Text(String(calendar.component(.year, from: today)))
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.white.opacity(0.6))
+                            }
+
+                            Spacer()
+
+                            Button {
+                                selectedMonth += 1
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.headline.weight(.semibold))
+                                    .frame(width: 36, height: 36)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(selectedMonth == 12)
+                        }
+
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 7), spacing: 8) {
+                            ForEach(0..<7, id: \.self) { weekdayIndex in
+                                Text(stats.weekdayName(for: weekdayIndex).prefix(3))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.65))
+                                    .frame(maxWidth: .infinity)
+                            }
+
+                            ForEach(Array(stats.monthGridDays(for: selectedMonth).enumerated()), id: \.offset) { _, date in
+                                if let date {
+                                    let day = stats.day(for: date)
+
+                                    HabitHeatMapSquare(
+                                        habit: habit,
+                                        day: day,
+                                        squareSize: 40,
+                                        isEnabled: !isFutureDay(date)
+                                    ) {
+                                        guard !isFutureDay(date) else { return }
+                                        selectedDay = IdentifiableDay(date: date)
+                                    }
+                                } else {
+                                    Color.clear
+                                        .frame(height: 40)
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18)
+                                .fill(Color.white.opacity(0.05))
+                        )
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 20)
+                }
+            }
+            .navigationTitle(habit.name)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .sheet(item: $selectedDay) { selectedDay in
+            HabitDayEditorView(habit: $habit, date: selectedDay.date) { date, quantity, isComplete, isRestDay in
+                applyDayEdit(for: date, quantity: quantity, isComplete: isComplete, isRestDay: isRestDay)
+            }
+            .preferredColorScheme(.dark)
+            .presentationDetents([.fraction(0.75)])
+        }
+    }
+
+    private func applyDayEdit(for date: Date, quantity: Int, isComplete: Bool, isRestDay: Bool) {
+        let normalizedDate = calendar.startOfDay(for: date)
+        let key = dayKey(for: normalizedDate)
+
+        habit.timeEntries.removeAll { "\($0.year)-\($0.month)-\($0.day)" == key }
+        habit.completedDays.remove(key)
+        habit.restDays.removeAll { $0.id == key }
+
+        if isRestDay {
+            let components = calendar.dateComponents([.year, .month, .day], from: normalizedDate)
+            habit.restDays.append(
+                RestDay(
+                    id: key,
+                    markedAt: normalizedDate,
+                    year: components.year ?? 0,
+                    month: components.month ?? 0,
+                    day: components.day ?? 0
+                )
+            )
+            adjustCreatedAtIfNeeded(for: normalizedDate)
+            return
+        }
+
+        if habit.isTrackingEnabled && quantity > 0 {
+            let components = calendar.dateComponents([.year, .month, .day], from: normalizedDate)
+            habit.timeEntries.append(
+                TimeEntry(
+                    loggedAt: normalizedDate,
+                    year: components.year ?? 0,
+                    month: components.month ?? 0,
+                    day: components.day ?? 0,
+                    minutes: quantity,
+                    unitLabel: habit.goal?.unit ?? habit.trackingUnit,
+                    dailyTarget: habit.goal?.dailyTarget
+                )
+            )
+        }
+
+        if isComplete {
+            habit.completedDays.insert(key)
+        }
+
+        if quantity > 0 || isComplete {
+            adjustCreatedAtIfNeeded(for: normalizedDate)
+        }
+    }
+
+    private func adjustCreatedAtIfNeeded(for date: Date) {
+        let normalizedCreatedAt = calendar.startOfDay(for: habit.createdAt)
+        if date < normalizedCreatedAt {
+            habit.createdAt = date
+        }
+    }
+
+    private func dayKey(for day: Date) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: day)
+        return "\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
+    }
+
+    private func isFutureDay(_ date: Date) -> Bool {
+        calendar.startOfDay(for: date) > today
+    }
+}
+
+struct HabitDayEditorView: View {
+    @Binding var habit: Habit
+
+    let date: Date
+    let onSave: (Date, Int, Bool, Bool) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var quantityInput: String
+    @State private var isMarkedComplete: Bool
+    @State private var isRestDay: Bool
+
+    private let keypadColumns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
+    private let keypadKeys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "⌫"]
+
+    init(habit: Binding<Habit>, date: Date, onSave: @escaping (Date, Int, Bool, Bool) -> Void) {
+        _habit = habit
+        self.date = Calendar(identifier: .gregorian).startOfDay(for: date)
+        self.onSave = onSave
+
+        let calendar = Calendar(identifier: .gregorian)
+        let normalizedDate = calendar.startOfDay(for: date)
+        let key = HabitDayEditorView.dayKey(for: normalizedDate, calendar: calendar)
+        let quantity = habit.wrappedValue.timeEntries
+            .filter { "\($0.year)-\($0.month)-\($0.day)" == key }
+            .reduce(0) { $0 + $1.minutes }
+        let isRestDay = habit.wrappedValue.restDays.contains { $0.id == key }
+        let isMarkedComplete = HabitDayEditorView.completionState(for: habit.wrappedValue, key: key, quantity: quantity)
+
+        _quantityInput = State(initialValue: quantity > 0 ? "\(quantity)" : "0")
+        _isMarkedComplete = State(initialValue: isMarkedComplete)
+        _isRestDay = State(initialValue: isRestDay)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                VStack(spacing: 14) {
+                    Text(date.formatted(date: .long, time: .omitted))
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Text(displayValue)
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 20)
+                                .fill(Color.white.opacity(0.07))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
+
+                    if habit.isTrackingEnabled {
+                        keypad
+                            .layoutPriority(1)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    VStack(spacing: 12) {
+                        Toggle("Mark as complete", isOn: $isMarkedComplete)
+                            .tint(habit.color)
+                            .onChange(of: isMarkedComplete) { _, isEnabled in
+                                if isEnabled {
+                                    isRestDay = false
+                                }
+                            }
+
+                        Toggle("Mark as rest day", isOn: $isRestDay)
+                            .tint(.indigo)
+                            .onChange(of: isRestDay) { _, isEnabled in
+                                guard isEnabled else { return }
+                                isMarkedComplete = false
+                                quantityInput = "0"
+                            }
+
+                        Button("Clear Day", role: .destructive) {
+                            quantityInput = "0"
+                            isMarkedComplete = false
+                            isRestDay = false
+                        }
+                        .frame(maxWidth: .infinity)
+                        .buttonStyle(.bordered)
+
+                        Button("Save") {
+                            saveAndDismiss()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .buttonStyle(.borderedProminent)
+                        .tint(habit.color)
+                    }
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 20)
+                            .fill(Color.white.opacity(0.05))
+                    )
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 16)
+            }
+            .navigationTitle("Edit Day")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        saveAndDismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private var quantityValue: Int {
+        let trimmedInput = quantityInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let quantity = Double(trimmedInput), quantity > 0 else { return 0 }
+        return Int(quantity.rounded())
+    }
+
+    private var displayValue: String {
+        quantityInput.isEmpty ? "0" : quantityInput
+    }
+
+    private var keypad: some View {
+        LazyVGrid(columns: keypadColumns, spacing: 12) {
+            ForEach(keypadKeys, id: \.self) { key in
+                keypadButton(for: key)
+            }
+        }
+    }
+
+    private func keypadButton(for key: String) -> some View {
+        Button {
+            handleKeypadInput(key)
+        } label: {
+            Text(key)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color.white.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func saveAndDismiss() {
+        onSave(date, quantityValue, isMarkedComplete, isRestDay)
+        dismiss()
+    }
+
+    private func handleKeypadInput(_ key: String) {
+        switch key {
+        case "⌫":
+            if quantityInput.count <= 1 {
+                quantityInput = "0"
+            } else {
+                quantityInput.removeLast()
+            }
+        case ".":
+            guard !quantityInput.contains(".") else { return }
+            quantityInput += "."
+        default:
+            if quantityInput == "0" {
+                quantityInput = key
+            } else {
+                quantityInput += key
+            }
+        }
+
+        if quantityValue > 0 || quantityInput.contains(".") {
+            isRestDay = false
+        }
+    }
+
+    private static func completionState(for habit: Habit, key: String, quantity: Int) -> Bool {
+        if let goal = habit.goal {
+            return habit.completedDays.contains(key) || quantity >= goal.dailyTarget
+        }
+
+        if habit.isTrackingEnabled {
+            return habit.completedDays.contains(key) || quantity > 0
+        }
+
+        return habit.completedDays.contains(key)
+    }
+
+    private static func dayKey(for day: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: day)
+        return "\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
+    }
+}
+
 struct WeekColumn: Identifiable {
     let start: Int
     let days: [Date?]
@@ -1105,6 +2255,10 @@ struct HabitStatsCalculator {
         min(today, endOfYear)
     }
 
+    private var createdAtDay: Date {
+        max(startOfYear, calendar.startOfDay(for: habit.createdAt))
+    }
+
     var activeUnitLabel: String {
         habit.goal?.unit ?? habit.trackingUnit
     }
@@ -1130,16 +2284,20 @@ struct HabitStatsCalculator {
         allYearDays.filter { $0.date <= cappedEndDate }
     }
 
+    private var consistencyDays: [HabitStatsDay] {
+        elapsedDays.filter { $0.date >= createdAtDay }
+    }
+
     var totalQuantity: Int {
         elapsedDays.reduce(0) { $0 + $1.quantity }
     }
 
     var eligibleDayCount: Int {
-        elapsedDays.filter(\.isEligible).count
+        consistencyDays.filter(\.isEligible).count
     }
 
     var completedDayCount: Int {
-        elapsedDays.filter { $0.isEligible && $0.isCompleted }.count
+        consistencyDays.filter { $0.isEligible && $0.isCompleted }.count
     }
 
     var consistencyRatio: Double {
@@ -1364,7 +2522,7 @@ struct HabitStatsCalculator {
         let key = dayKey(for: date)
         let isRestDay = habit.restDays.contains { $0.id == key }
         let quantity = progress(for: key)
-        let isEligible = date <= cappedEndDate && !isRestDay
+        let isEligible = date >= createdAtDay && date <= cappedEndDate && !isRestDay
         let isCompleted = completionState(for: key, quantity: quantity)
         let progressRatio = progressRatio(for: key, quantity: quantity)
 
@@ -1818,7 +2976,16 @@ struct HabitHeatMapSquare: View {
     let habit: Habit
     let day: HabitStatsDay
     let squareSize: CGFloat
+    let isEnabled: Bool
     let onTap: () -> Void
+
+    init(habit: Habit, day: HabitStatsDay, squareSize: CGFloat, isEnabled: Bool = true, onTap: @escaping () -> Void) {
+        self.habit = habit
+        self.day = day
+        self.squareSize = squareSize
+        self.isEnabled = isEnabled
+        self.onTap = onTap
+    }
 
     var body: some View {
         Button(action: onTap) {
@@ -1826,11 +2993,20 @@ struct HabitHeatMapSquare: View {
                 .fill(fillColor)
                 .frame(width: squareSize, height: squareSize)
                 .overlay(
-                    RoundedRectangle(cornerRadius: squareSize * 0.22)
-                        .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: squareSize * 0.22)
+                            .stroke(Color.white.opacity(0.09), lineWidth: 1)
+
+                        if day.isRestDay && !isFutureDay {
+                            Image(systemName: "moon")
+                                .font(.system(size: squareSize * 0.58, weight: .thin))
+                                .foregroundStyle(.white.opacity(0.82))
+                        }
+                    }
                 )
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
     }
 
     private var fillColor: Color {
@@ -1839,7 +3015,7 @@ struct HabitHeatMapSquare: View {
         }
 
         if day.isRestDay {
-            return Color.gray.opacity(0.55)
+            return Color.white.opacity(0.12)
         }
 
         if day.progressRatio > 0 {
@@ -1847,6 +3023,10 @@ struct HabitHeatMapSquare: View {
         }
 
         return Color.white.opacity(0.12)
+    }
+
+    private var isFutureDay: Bool {
+        day.date > Date()
     }
 }
 
@@ -2144,6 +3324,7 @@ struct HabitLinkedRewardsSection: View {
 struct RewardsView: View {
     @Binding var rewards: [Reward]
     let habits: [Habit]
+    let isEditingReward: Bool
     @Binding var isShowingAddReward: Bool
     @Binding var newRewardName: String
     @Binding var newRewardTarget: String
@@ -2152,17 +3333,24 @@ struct RewardsView: View {
     @Binding var newRewardHasCustomStartDate: Bool
     @Binding var newRewardEndDate: Date
     @Binding var newRewardHasDeadline: Bool
+    @Binding var newRewardProgressRule: RewardProgressRule
     @Binding var selectedBulkStampRewardID: UUID?
     @Binding var bulkStampAmount: String
     @Binding var highlightedRewardID: UUID?
     @Binding var celebratingRewardID: UUID?
 
     let onStartAddingReward: () -> Void
+    let onEditReward: (Reward) -> Void
+    let onDeleteReward: (UUID) -> Void
     let onCancelRewardModal: () -> Void
     let onSaveReward: () -> Void
     let onRewardTap: (Reward) -> Void
     let onConfirmBulkStamp: () -> Void
     let onClaimReward: (Reward) -> Void
+    let onRestoreReward: (Reward) -> Void
+
+    @State private var isShowingRewardHistory = false
+    @State private var rewardPendingDeletion: Reward?
 
     var body: some View {
         NavigationStack {
@@ -2188,7 +3376,9 @@ struct RewardsView: View {
                                     isHighlighted: highlightedRewardID == reward.id,
                                     isCelebrating: celebratingRewardID == reward.id,
                                     onTap: { onRewardTap(reward) },
-                                    onClaim: { onClaimReward(reward) }
+                                    onClaim: { onClaimReward(reward) },
+                                    onEdit: { onEditReward(reward) },
+                                    onDelete: { rewardPendingDeletion = reward }
                                 )
                             }
                         }
@@ -2199,6 +3389,15 @@ struct RewardsView: View {
             }
             .navigationTitle("Rewards")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isShowingRewardHistory = true
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                    }
+                    .accessibilityLabel("Reward history")
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         onStartAddingReward()
@@ -2218,7 +3417,10 @@ struct RewardsView: View {
                     hasCustomStartDate: $newRewardHasCustomStartDate,
                     endDate: $newRewardEndDate,
                     hasDeadline: $newRewardHasDeadline,
+                    progressRule: $newRewardProgressRule,
                     habits: habits,
+                    title: isEditingReward ? "Edit Reward" : "New Reward",
+                    saveButtonTitle: isEditingReward ? "Save" : "Add",
                     onCancel: onCancelRewardModal,
                     onSave: onSaveReward
                 )
@@ -2245,6 +3447,30 @@ struct RewardsView: View {
                 )
                 .preferredColorScheme(.dark)
                 .presentationDetents([.height(220)])
+            }
+            .sheet(isPresented: $isShowingRewardHistory) {
+                RewardHistoryView(
+                    rewards: rewards,
+                    habits: habits,
+                    onEdit: onEditReward,
+                    onDelete: onDeleteReward,
+                    onRestore: onRestoreReward
+                )
+                .preferredColorScheme(.dark)
+            }
+            .confirmationDialog(
+                "Delete \(rewardPendingDeletion?.name ?? "Reward")?",
+                isPresented: Binding(
+                    get: { rewardPendingDeletion != nil },
+                    set: { if !$0 { rewardPendingDeletion = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete Reward", role: .destructive) {
+                    guard let rewardPendingDeletion else { return }
+                    onDeleteReward(rewardPendingDeletion.id)
+                    self.rewardPendingDeletion = nil
+                }
             }
         }
     }
@@ -2338,8 +3564,11 @@ struct AddRewardView: View {
     @Binding var hasCustomStartDate: Bool
     @Binding var endDate: Date
     @Binding var hasDeadline: Bool
+    @Binding var progressRule: RewardProgressRule
 
     let habits: [Habit]
+    let title: String
+    let saveButtonTitle: String
     let onCancel: () -> Void
     let onSave: () -> Void
 
@@ -2384,10 +3613,30 @@ struct AddRewardView: View {
                             .tag(Optional(habit.id))
                     }
                 }
+
+                if let linkedHabit {
+                    Section("Linked progress") {
+                        Picker("Count", selection: $progressRule) {
+                            ForEach(availableProgressRules(for: linkedHabit)) { rule in
+                                Text(rule.title)
+                                    .tag(rule)
+                            }
+                        }
+
+                        Text(progressRule.description(for: linkedHabit))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
             .background(Color.black)
-            .navigationTitle("New Reward")
+            .navigationTitle(title)
+            .onChange(of: linkedHabitID) { _, _ in
+                if !availableProgressRules(for: linkedHabit).contains(progressRule) {
+                    progressRule = .automatic
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -2396,7 +3645,7 @@ struct AddRewardView: View {
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
+                    Button(saveButtonTitle) {
                         onSave()
                     }
                     .disabled(!canSave)
@@ -2409,6 +3658,24 @@ struct AddRewardView: View {
         let trimmedName = rewardName.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = Int(stampTarget.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         return !trimmedName.isEmpty && target > 0
+    }
+
+    private var linkedHabit: Habit? {
+        guard let linkedHabitID else { return nil }
+        return habits.first { $0.id == linkedHabitID }
+    }
+
+    private func availableProgressRules(for habit: Habit?) -> [RewardProgressRule] {
+        guard let habit else { return [.automatic] }
+
+        var rules: [RewardProgressRule] = [.automatic, .completedDays]
+        if habit.isTrackingEnabled {
+            rules.insert(.loggedQuantity, at: 1)
+        }
+        if habit.goal != nil {
+            rules.append(.goalMetDays)
+        }
+        return rules
     }
 }
 
@@ -2446,6 +3713,124 @@ struct RewardBulkStampView: View {
                     .disabled((Int(amount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) <= 0)
                 }
             }
+        }
+    }
+}
+
+struct RewardHistoryView: View {
+    let rewards: [Reward]
+    let habits: [Habit]
+    let onEdit: (Reward) -> Void
+    let onDelete: (UUID) -> Void
+    let onRestore: (Reward) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var rewardPendingDeletion: Reward?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                if rewards.isEmpty {
+                    ContentUnavailableView(
+                        "No Reward History",
+                        systemImage: "clock.arrow.circlepath",
+                        description: Text("Reward activity will appear here.")
+                    )
+                } else {
+                    List {
+                        ForEach(sortedRewards) { reward in
+                            Section {
+                                let entries = rewardHistoryEntries(for: reward, habits: habits)
+
+                                if entries.isEmpty {
+                                    Text("No activity yet")
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    ForEach(entries) { entry in
+                                        HStack(spacing: 12) {
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text(entry.detail)
+                                                    .foregroundStyle(.primary)
+
+                                                Text(entry.date.formatted(date: .abbreviated, time: .shortened))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+
+                                            Spacer()
+
+                                            if entry.amount > 0 {
+                                                Text("+\(entry.amount)")
+                                                    .font(.headline.monospacedDigit())
+                                                    .foregroundStyle(.yellow)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if reward.isArchived {
+                                    Button("Restore Reward") {
+                                        onRestore(reward)
+                                    }
+                                }
+                            } header: {
+                                HStack {
+                                    Text(reward.name)
+                                    Spacer()
+                                    Text(reward.isArchived ? "Claimed" : "\(rewardStampCount(for: reward, habits: habits)) / \(reward.stampTarget)")
+                                }
+                            }
+                            .contextMenu {
+                                Button {
+                                    dismiss()
+                                    DispatchQueue.main.async {
+                                        onEdit(reward)
+                                    }
+                                } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+
+                                Button(role: .destructive) {
+                                    rewardPendingDeletion = reward
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                    .scrollContentBackground(.hidden)
+                }
+            }
+            .navigationTitle("Reward History")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+            .confirmationDialog(
+                "Delete \(rewardPendingDeletion?.name ?? "Reward")?",
+                isPresented: Binding(
+                    get: { rewardPendingDeletion != nil },
+                    set: { if !$0 { rewardPendingDeletion = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete Reward", role: .destructive) {
+                    guard let rewardPendingDeletion else { return }
+                    onDelete(rewardPendingDeletion.id)
+                    self.rewardPendingDeletion = nil
+                }
+            }
+        }
+    }
+
+    private var sortedRewards: [Reward] {
+        rewards.sorted {
+            ($0.claimedAt ?? $0.startDate) > ($1.claimedAt ?? $1.startDate)
         }
     }
 }
@@ -2564,6 +3949,8 @@ struct RewardCard: View {
     let isCelebrating: Bool
     let onTap: () -> Void
     let onClaim: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -2583,6 +3970,10 @@ struct RewardCard: View {
                         Text("Linked to \(linkedHabitName)")
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.62))
+
+                        Text(reward.linkedProgressRule.title)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.5))
                     } else {
                         Text("Tap to add stamps")
                             .font(.subheadline)
@@ -2592,10 +3983,30 @@ struct RewardCard: View {
 
                 Spacer()
 
-                if reward.stampTarget > 10 {
-                    Text("\(stampCount) / \(reward.stampTarget)")
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(progressColor)
+                VStack(alignment: .trailing, spacing: 10) {
+                    Menu {
+                        Button {
+                            onEdit()
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+
+                        Button(role: .destructive) {
+                            onDelete()
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3)
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+
+                    if reward.stampTarget > 10 {
+                        Text("\(stampCount) / \(reward.stampTarget)")
+                            .font(.headline.monospacedDigit())
+                            .foregroundStyle(progressColor)
+                    }
                 }
             }
 
@@ -2644,6 +4055,19 @@ struct RewardCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 20))
         .onTapGesture {
             onTap()
+        }
+        .contextMenu {
+            Button {
+                onEdit()
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
         }
     }
 
@@ -2758,7 +4182,7 @@ struct StatsHabitCard: View {
         else { return [] }
 
         var days: [Date] = []
-        var currentDay = startOfYear
+        var currentDay = max(startOfYear, calendar.startOfDay(for: habit.createdAt))
 
         while currentDay <= today {
             days.append(currentDay)
@@ -2997,5 +4421,9 @@ struct SymbolPickerView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(
+        storage: UserDefaults(suiteName: "TimekeeperPreview") ?? .standard,
+        developerModeOverride: true,
+        usePersistedDatasets: false
+    )
 }
