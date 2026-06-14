@@ -72,6 +72,66 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		7D6A45D82FDBD72B00CB993B /* Models */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		7D6A45D92FDBD72B00CB993B /* Persistence */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Persistence;
+			sourceTree = "<group>";
+		};
+		7D6A45DA2FDBD72C00CB993B /* Logic */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Logic;
+			sourceTree = "<group>";
+		};
+		7D6A45DB2FDBD73200CB993B /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				7D6A45DC2FDBD73200CB993B /* Habits */,
+				7D6A45DD2FDBD73200CB993B /* Rewards */,
+				7D6A45DE2FDBD73200CB993B /* Stats */,
+				7D6A45DF2FDBD73300CB993B /* Settings */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		7D6A45DC2FDBD73200CB993B /* Habits */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Habits;
+			sourceTree = "<group>";
+		};
+		7D6A45DD2FDBD73200CB993B /* Rewards */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Rewards;
+			sourceTree = "<group>";
+		};
+		7D6A45DE2FDBD73200CB993B /* Stats */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Stats;
+			sourceTree = "<group>";
+		};
+		7D6A45DF2FDBD73300CB993B /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
 		7DBD538E2FCD70EB00DEF8D6 = {
 			isa = PBXGroup;
 			children = (
@@ -79,6 +139,10 @@
 				7DBD53A72FCD70EE00DEF8D6 /* TimekeeperTests */,
 				7DBD53B12FCD70EE00DEF8D6 /* TimekeeperUITests */,
 				7DBD53982FCD70EC00DEF8D6 /* Products */,
+				7D6A45D82FDBD72B00CB993B /* Models */,
+				7D6A45D92FDBD72B00CB993B /* Persistence */,
+				7D6A45DA2FDBD72C00CB993B /* Logic */,
+				7D6A45DB2FDBD73200CB993B /* Views */,
 			);
 			sourceTree = "<group>";
 		};
@@ -458,8 +522,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 556NDNQ92W;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
@@ -479,8 +545,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 556NDNQ92W;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
@@ -501,6 +569,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 556NDNQ92W;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.shb.TimekeeperUITests;
@@ -520,6 +589,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 556NDNQ92W;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.shb.TimekeeperUITests;

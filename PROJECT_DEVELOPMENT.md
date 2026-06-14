@@ -4,12 +4,43 @@
 
 - Timekeeper is a dark-mode SwiftUI habit tracker.
 - The app currently has four tabs: Habits, Stats, Rewards, and Settings.
-- Most application models, persistence, calculations, and views currently live in `Timekeeper/ContentView.swift`.
+- The root app coordinator lives in `Timekeeper/ContentView.swift`.
+- Models, persistence, calculation logic, and feature views are split into focused files under `Timekeeper/Models`, `Timekeeper/Persistence`, `Timekeeper/Logic`, and `Timekeeper/Views`.
 - Habit and reward datasets are JSON-encoded and persisted in `UserDefaults`.
 - Developer Mode switches between two separately persisted datasets:
   - Developer Mode on uses the seeded mock dataset.
   - Developer Mode off uses the real dataset, which starts empty.
 - Developer Mode defaults to on. Persisted data is loaded before the embedded defaults, so an existing installation may differ from the seed data.
+
+## Source Structure
+
+- `Timekeeper/ContentView.swift`
+  - Root `TabView` container
+  - App-level state for active dataset selection, add/edit sheets, reward stamping, and persistence triggers
+- `Timekeeper/Models/HabitModels.swift`
+  - Habit, goal, rest-day, time-entry, reward, reward-history, and reward-progress model types
+- `Timekeeper/Models/HabitSymbolOption.swift`
+  - SF Symbol option catalog and labels for habits
+- `Timekeeper/Persistence/MockData.swift`
+  - Deterministic seeded mock habits and rewards
+  - `SeededGenerator`
+- `Timekeeper/Persistence/StorageModels.swift`
+  - `UserDefaults` storage keys
+  - Data-mode enum
+  - Codable storage DTOs
+  - `Color` codable conversion helpers
+- `Timekeeper/Logic/RewardProgress.swift`
+  - Reward progress aggregation and reward history entry generation
+- `Timekeeper/Logic/HabitStatsCalculator.swift`
+  - Yearly habit stats data structures and calculation logic
+- `Timekeeper/Views/Habits`
+  - `HabitRow`, `HabitHistorySheet`, `HabitDayEditorView`, `TimeEntryView`, `AddHabitView`, `SymbolPickerView`
+- `Timekeeper/Views/Stats`
+  - `StatsView`, stats detail sections, and `StatsHabitCard`
+- `Timekeeper/Views/Rewards`
+  - `RewardsView`, `RewardCard`, `AddRewardView`, `RewardBulkStampView`, `RewardHistoryView`
+- `Timekeeper/Views/Settings/SettingsView.swift`
+  - Settings form and Developer Mode toggle
 
 ## Habit Features
 
@@ -145,7 +176,6 @@
 
 ## Known Limitations
 
-- `ContentView.swift` is large and contains most of the app's responsibilities.
 - Habit-card heat maps are hard-coded to 2026 while detailed stats use the runtime current year.
 - Progress quantities are stored in the model property named `minutes`, even when the unit is pages or kilometres.
 - Persistence uses `UserDefaults`; there is no database, cloud sync, migration strategy, or import/export flow.
@@ -154,7 +184,6 @@
 ## Next Priorities
 
 - Add automated coverage for persistence, habit/day editing, goals, stats calculations, and rewards.
-- Split `ContentView.swift` into focused model, persistence, calculation, and view files.
 - Replace the fixed 2026 habit heat map with a runtime-year or selectable-year implementation.
 - Add dataset reset controls.
 - Rename the generic tracked quantity field or introduce a clearer progress-entry model.
