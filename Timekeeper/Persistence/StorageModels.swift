@@ -154,6 +154,7 @@ struct StoredHabit: Codable {
 struct StoredReward: Codable {
     let id: UUID
     let name: String
+    let description: String?
     let stampTarget: Int
     let linkedHabitID: UUID?
     let startDate: Date
@@ -167,6 +168,7 @@ struct StoredReward: Codable {
     init(_ reward: Reward) {
         id = reward.id
         name = reward.name
+        description = reward.description
         stampTarget = reward.stampTarget
         linkedHabitID = reward.linkedHabitID
         startDate = reward.startDate
@@ -182,6 +184,7 @@ struct StoredReward: Codable {
         Reward(
             id: id,
             name: name,
+            description: description ?? "",
             stampTarget: stampTarget,
             linkedHabitID: linkedHabitID,
             startDate: startDate,

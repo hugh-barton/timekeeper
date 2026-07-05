@@ -104,7 +104,7 @@ struct TimekeeperTests {
             linkedProgressRule: .completedDays
         )
 
-        #expect(rewardStampCount(for: reward, habits: [habit]) == 3)
+        #expect(rewardStampCount(for: reward, habits: [habit]) == 2)
     }
 
     @MainActor @Test func linkedRewardCanCountGoalMetDays() async throws {
@@ -226,6 +226,110 @@ struct TimekeeperTests {
         #expect(history.count == 2)
         #expect(history.first?.detail == "Reward claimed")
         #expect(history.last?.amount == 3)
+    }
+
+    @Test func manualRewardStampRemovalUsesLatestEligibleEntry() {
+        let calendar = Calendar(identifier: .gregorian)
+        var reward = Reward(
+            name: "Massage",
+            stampTarget: 5,
+            startDate: date(2026, 6, 2, calendar),
+            manualStampEntries: [
+                RewardStampEntry(
+                    id: UUID(uuidString: "10101010-1010-1010-1010-101010101010")!,
+                    stampedAt: date(2026, 6, 1, calendar),
+                    amount: 3
+                ),
+                RewardStampEntry(
+                    id: UUID(uuidString: "20202020-2020-2020-2020-202020202020")!,
+                    stampedAt: date(2026, 6, 4, calendar),
+                    amount: 2
+                )
+            ]
+        )
+
+        #expect(removeOneManualRewardStamp(from: &reward, calendar: calendar))
+        #expect(reward.manualStampEntries.count == 2)
+        #expect(reward.manualStampEntries.last?.amount == 1)
+        #expect(rewardStampCount(for: reward, habits: []) == 1)
+    }
+
+    @Test func linkedLoggedQuantityStampRemovalReducesLatestEntry() {
+        let calendar = Calendar(identifier: .gregorian)
+        let habitID = UUID()
+        var habit = Habit(
+            id: habitID,
+            name: "Reading",
+            color: .green,
+            isTrackingEnabled: true,
+            trackingUnit: "pages",
+            timeEntries: [
+                TimeEntry(loggedAt: date(2026, 6, 7, calendar), year: 2026, month: 6, day: 7, minutes: 4, unitLabel: "pages"),
+                TimeEntry(loggedAt: date(2026, 6, 8, calendar), year: 2026, month: 6, day: 8, minutes: 3, unitLabel: "pages")
+            ]
+        )
+        let reward = Reward(
+            name: "Buy a Novel",
+            stampTarget: 10,
+            linkedHabitID: habitID,
+            startDate: date(2026, 6, 1, calendar)
+        )
+
+        #expect(removeOneLinkedRewardStamp(from: reward, habit: &habit, calendar: calendar))
+        #expect(rewardStampCount(for: reward, habits: [habit]) == 6)
+        #expect(habit.timeEntries.last?.minutes == 2)
+    }
+
+    @Test func linkedCompletedDayStampRemovalUnmarksLatestEligibleDay() {
+        let calendar = Calendar(identifier: .gregorian)
+        let habitID = UUID()
+        var habit = Habit(
+            id: habitID,
+            name: "Stretching",
+            color: .blue,
+            completedDays: ["2026-6-2", "2026-6-3", "2026-6-4"]
+        )
+        let reward = Reward(
+            name: "Coffee",
+            stampTarget: 5,
+            linkedHabitID: habitID,
+            startDate: date(2026, 6, 2, calendar),
+            linkedProgressRule: .completedDays
+        )
+
+        #expect(removeOneLinkedRewardStamp(from: reward, habit: &habit, calendar: calendar))
+        #expect(!habit.completedDays.contains("2026-6-4"))
+        #expect(rewardStampCount(for: reward, habits: [habit]) == 2)
+    }
+
+    @Test func linkedGoalMetStampRemovalBreaksLatestGoalDay() {
+        let calendar = Calendar(identifier: .gregorian)
+        let habitID = UUID()
+        var habit = Habit(
+            id: habitID,
+            name: "Running",
+            color: .yellow,
+            isTrackingEnabled: true,
+            trackingUnit: "km",
+            goal: HabitGoal(unit: "km", dailyTarget: 5),
+            completedDays: ["2026-6-7", "2026-6-8"],
+            timeEntries: [
+                TimeEntry(loggedAt: date(2026, 6, 7, calendar), year: 2026, month: 6, day: 7, minutes: 5, unitLabel: "km"),
+                TimeEntry(loggedAt: date(2026, 6, 8, calendar), year: 2026, month: 6, day: 8, minutes: 6, unitLabel: "km")
+            ]
+        )
+        let reward = Reward(
+            name: "Race Entry",
+            stampTarget: 5,
+            linkedHabitID: habitID,
+            startDate: date(2026, 6, 1, calendar),
+            linkedProgressRule: .goalMetDays
+        )
+
+        #expect(removeOneLinkedRewardStamp(from: reward, habit: &habit, calendar: calendar))
+        #expect(rewardStampCount(for: reward, habits: [habit]) == 1)
+        #expect(!habit.completedDays.contains("2026-6-8"))
+        #expect(habit.timeEntries.reduce(0) { $0 + $1.minutes } == 9)
     }
 
     @Test func reminderFrequencyBuildsExpectedNotificationComponents() {

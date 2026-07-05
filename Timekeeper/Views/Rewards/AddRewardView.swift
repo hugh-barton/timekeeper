@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AddRewardView: View {
     @Binding var rewardName: String
+    @Binding var rewardDescription: String
     @Binding var stampTarget: String
     @Binding var linkedHabitID: UUID?
     @Binding var startDate: Date
@@ -21,6 +22,9 @@ struct AddRewardView: View {
             Form {
                 TextField("Reward name", text: $rewardName)
                     .textInputAutocapitalization(.words)
+
+                TextField("Short description (optional)", text: $rewardDescription, axis: .vertical)
+                    .lineLimit(2...3)
 
                 TextField("Stamp target", text: $stampTarget)
                     .keyboardType(.numberPad)

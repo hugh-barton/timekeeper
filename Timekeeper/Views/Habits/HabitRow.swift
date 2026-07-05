@@ -3,6 +3,7 @@ import SwiftUI
 struct HabitRow: View {
     @Binding var habit: Habit
 
+    let rewards: [Reward]
     let days: [Date]
     let expandedHeight: CGFloat
     let todayKey: String
@@ -29,7 +30,6 @@ struct HabitRow: View {
     private var squareSize: CGFloat { isCollapsed ? 8 : 10 }
     private var squareSpacing: CGFloat { isCollapsed ? 3 : 4 }
     private var checkboxSize: CGFloat { isCollapsed ? 24 : 30 }
-    private var saveButtonSize: CGFloat { isCollapsed ? 24 : 30 }
     private var horizontalSpacing: CGFloat { isCollapsed ? 10 : 12 }
     private var cardSpacing: CGFloat { isCollapsed ? 6 : 8 }
     private var cardPadding: CGFloat { isCollapsed ? 10 : 14 }
@@ -38,11 +38,16 @@ struct HabitRow: View {
     private var compactHeatMapDays: [Date] {
         Array(days.filter { $0 <= Date() }.suffix(5))
     }
+    private var swipeRevealWidth: CGFloat {
+        min(swipeActionWidth, max(0, -swipeOffset))
+    }
 
     var body: some View {
         ZStack(alignment: .trailing) {
-            if swipeOffset < 0 {
+            if swipeRevealWidth > 0 {
                 restDaySwipeAction
+                    .frame(width: swipeRevealWidth, alignment: .trailing)
+                    .clipped()
             }
 
             cardContent
@@ -84,18 +89,24 @@ struct HabitRow: View {
             TimeEntryView(
                 habitName: habit.name,
                 unitLabel: activeUnitLabel,
+                loggedTodayValue: progress(for: todayKey),
                 title: "Log Progress",
                 placeholder: activeUnitLabel.capitalized,
                 manualTimeInput: $manualTimeInput,
                 sessionMinutes: $sessionMinutes,
                 allowsEmptySave: shouldMarkCompleteOnSave,
+                onClear: clearTrackedProgressAction,
                 onCancel: cancelTimeEntrySession,
                 onSave: saveTimeEntry
             )
             .preferredColorScheme(.dark)
         }
         .sheet(isPresented: $isShowingHistory) {
-            HabitHistorySheet(habit: $habit, initialMonth: calendar.component(.month, from: Date()))
+            HabitHistorySheet(
+                habit: $habit,
+                rewards: rewards,
+                initialMonth: calendar.component(.month, from: Date())
+            )
                 .preferredColorScheme(.dark)
         }
     }
@@ -164,24 +175,11 @@ struct HabitRow: View {
                     Button {
                         handlePrimaryProgressAction()
                     } label: {
-                        progressIndicator
+                        combinedProgressIndicator
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(habit.isTrackingEnabled ? "Log progress for \(habit.name)" : "Toggle \(habit.name)")
                     .accessibilityValue(progressAccessibilityValue)
-
-                    if habit.isTrackingEnabled {
-                        Button {
-                            shouldMarkCompleteOnSave = false
-                            isShowingTimeEntry = true
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(isCollapsed ? .caption2.weight(.bold) : .caption.weight(.bold))
-                                .frame(width: saveButtonSize, height: saveButtonSize)
-                        }
-                        .buttonStyle(.bordered)
-                        .accessibilityLabel("Log progress for \(habit.name)")
-                    }
                 }
                 .simultaneousGesture(cardSwipeGesture)
             }
@@ -322,12 +320,41 @@ struct HabitRow: View {
         }
     }
 
+    private var combinedProgressIndicator: some View {
+        ZStack {
+            progressIndicator
+
+            if habit.isTrackingEnabled && !isRestToday {
+                Image(systemName: "plus")
+                    .font(isCollapsed ? .caption2.weight(.bold) : .caption.weight(.bold))
+                    .foregroundStyle(progressIconForegroundStyle)
+            }
+        }
+    }
+
     private var todayProgressRatio: Double {
         progressRatio(for: todayKey)
     }
 
+    private var progressIconForegroundStyle: Color {
+        if habit.goal == nil && isCompleteToday {
+            return .black
+        }
+
+        return .white
+    }
+
     private var activeUnitLabel: String {
         habit.goal?.unit ?? habit.trackingUnit
+    }
+
+    private var canClearTrackedProgressToday: Bool {
+        guard habit.isTrackingEnabled, !isRestToday else { return false }
+        return progress(for: todayKey) > 0 || habit.completedDays.contains(todayKey)
+    }
+
+    private var clearTrackedProgressAction: (() -> Void)? {
+        canClearTrackedProgressToday ? { clearTrackedProgressAndDismissEntry() } : nil
     }
 
     private var currentWeekColumnID: Int? {
@@ -407,6 +434,7 @@ struct HabitRow: View {
                     }
                 }
             )
+            .opacity(isFutureDay(day) ? 0.45 : 1)
     }
 
     private func toggleTodayCompletion() {
@@ -425,15 +453,9 @@ struct HabitRow: View {
             return
         }
 
-        if habit.goal != nil {
-            if isCompleteToday {
-                clearTodayProgress()
-            } else {
-                shouldMarkCompleteOnSave = true
-                isShowingTimeEntry = true
-            }
-        } else if habit.isTrackingEnabled {
-            toggleTodayCompletion()
+        if habit.isTrackingEnabled {
+            shouldMarkCompleteOnSave = habit.goal == nil
+            isShowingTimeEntry = true
         } else {
             toggleTodayCompletion()
         }
@@ -451,25 +473,21 @@ struct HabitRow: View {
             habit.completedDays.insert(todayKey)
         }
 
-        updateGoalCompletionForToday()
+        updateGoalCompletion(for: &habit, dayKey: todayKey)
         resetTimeEntrySession()
         shouldMarkCompleteOnSave = false
         isShowingTimeEntry = false
     }
 
-    private func updateGoalCompletionForToday() {
-        guard let goal = habit.goal else { return }
-
-        if progress(for: todayKey) >= goal.dailyTarget {
-            habit.completedDays.insert(todayKey)
-        } else {
-            habit.completedDays.remove(todayKey)
-        }
-    }
-
     private func clearTodayProgress() {
         habit.completedDays.remove(todayKey)
         habit.timeEntries.removeAll { "\($0.year)-\($0.month)-\($0.day)" == todayKey }
+    }
+
+    private func clearTrackedProgressAndDismissEntry() {
+        clearTodayProgress()
+        resetTimeEntrySession()
+        isShowingTimeEntry = false
     }
 
     private func resetTimeEntrySession() {

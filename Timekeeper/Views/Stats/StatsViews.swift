@@ -378,6 +378,7 @@ struct HabitHeatMapSquare: View {
                         }
                     }
                 )
+                .opacity(isFutureDay ? 0.45 : 1)
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)

@@ -6,8 +6,236 @@ private struct IdentifiableDay: Identifiable {
     var id: Date { date }
 }
 
+private struct HabitHistorySnapshotView: View {
+    let habit: Habit
+    let rewards: [Reward]
+    let stats: HabitStatsCalculator
+    let today: Date
+    let calendar: Calendar
+
+    private var todayDay: HabitStatsDay {
+        stats.day(for: today)
+    }
+
+    private var latestLogEntry: TimeEntry? {
+        habit.timeEntries.max { $0.loggedAt < $1.loggedAt }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if habit.isTrackingEnabled {
+                snapshotRow(
+                    title: "Today",
+                    value: todaySummaryText
+                )
+
+                snapshotRow(
+                    title: "Last Log",
+                    value: lastLogSummaryText
+                )
+            } else {
+                snapshotRow(
+                    title: "Today",
+                    value: binaryStatusText
+                )
+
+                if let completionTimeText {
+                    snapshotRow(
+                        title: "Completed",
+                        value: completionTimeText
+                    )
+                }
+            }
+
+            snapshotRow(
+                title: "Streak",
+                value: "\(stats.currentStreak) day streak, Best: \(stats.longestStreak) days"
+            )
+
+            if let goal = habit.goal {
+                snapshotRow(
+                    title: "Goal",
+                    value: "\(todayDay.quantity) / \(goal.dailyTarget) \(goal.unit)"
+                )
+            }
+
+            NavigationLink {
+                HabitStatsDetailView(
+                    habit: habit,
+                    rewards: rewards,
+                    today: today,
+                    calendar: calendar
+                )
+            } label: {
+                HStack(spacing: 6) {
+                    Text("View Full Stats")
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.bold))
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(habit.color)
+                .padding(.top, 2)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private var todaySummaryText: String {
+        if todayDay.isRestDay {
+            return "Rest day"
+        }
+
+        let unitLabel = stats.activeUnitLabel
+        if todayDay.quantity > 0 {
+            return "\(todayDay.quantity) \(unitLabel) today"
+        }
+
+        return "No \(unitLabel) logged today"
+    }
+
+    private var lastLogSummaryText: String {
+        guard let latestLogEntry else { return "No log sessions yet" }
+        return "\(latestLogEntry.minutes) \(latestLogEntry.unitLabel) at \(timeText(for: latestLogEntry.loggedAt))"
+    }
+
+    private var binaryStatusText: String {
+        if todayDay.isRestDay {
+            return "Rest day"
+        }
+
+        return todayDay.isCompleted ? "Completed" : "Not yet completed"
+    }
+
+    private var completionTimeText: String? {
+        guard todayDay.isCompleted else { return nil }
+
+        if let matchingEntry = habit.timeEntries
+            .filter({ calendar.isDate($0.loggedAt, inSameDayAs: today) })
+            .max(by: { $0.loggedAt < $1.loggedAt }) {
+            return "Marked complete at \(timeText(for: matchingEntry.loggedAt))"
+        }
+
+        return nil
+    }
+
+    private func snapshotRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .frame(width: 62, alignment: .leading)
+
+            Text(value)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+    }
+
+    private func timeText(for date: Date) -> String {
+        date.formatted(.dateTime.hour().minute())
+    }
+}
+
+struct HabitQuantityKeypadView: View {
+    @Binding var quantityInput: String
+
+    let onInputChanged: (() -> Void)?
+
+    private let keypadColumns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
+    private let keypadKeys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "⌫"]
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text(displayValue)
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 20)
+                        .fill(Color.white.opacity(0.07))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+
+            LazyVGrid(columns: keypadColumns, spacing: 12) {
+                ForEach(keypadKeys, id: \.self) { key in
+                    keypadButton(for: key)
+                }
+            }
+        }
+    }
+
+    private var displayValue: String {
+        quantityInput.isEmpty ? "0" : quantityInput
+    }
+
+    private var quantityValue: Int {
+        let trimmedInput = quantityInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let quantity = Double(trimmedInput), quantity > 0 else { return 0 }
+        return Int(quantity.rounded())
+    }
+
+    private func keypadButton(for key: String) -> some View {
+        Button {
+            handleKeypadInput(key)
+        } label: {
+            Text(key)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color.white.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func handleKeypadInput(_ key: String) {
+        switch key {
+        case "⌫":
+            if quantityInput.count <= 1 {
+                quantityInput = "0"
+            } else {
+                quantityInput.removeLast()
+            }
+        case ".":
+            guard !quantityInput.contains(".") else { return }
+            quantityInput += "."
+        default:
+            if quantityInput == "0" {
+                quantityInput = key
+            } else {
+                quantityInput += key
+            }
+        }
+
+        if quantityValue > 0 || quantityInput.contains(".") {
+            onInputChanged?()
+        }
+    }
+}
+
 struct HabitHistorySheet: View {
     @Binding var habit: Habit
+    let rewards: [Reward]
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedMonth: Int
@@ -16,8 +244,9 @@ struct HabitHistorySheet: View {
     private let calendar = Calendar(identifier: .gregorian)
     private let today: Date
 
-    init(habit: Binding<Habit>, initialMonth: Int) {
+    init(habit: Binding<Habit>, rewards: [Reward], initialMonth: Int) {
         _habit = habit
+        self.rewards = rewards
         _selectedMonth = State(initialValue: initialMonth)
         today = Calendar(identifier: .gregorian).startOfDay(for: Date())
     }
@@ -99,6 +328,14 @@ struct HabitHistorySheet: View {
                             RoundedRectangle(cornerRadius: 18)
                                 .fill(Color.white.opacity(0.05))
                         )
+
+                        HabitHistorySnapshotView(
+                            habit: habit,
+                            rewards: rewards,
+                            stats: stats,
+                            today: today,
+                            calendar: calendar
+                        )
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 20)
@@ -126,6 +363,8 @@ struct HabitHistorySheet: View {
     private func applyDayEdit(for date: Date, quantity: Int, isComplete: Bool, isRestDay: Bool) {
         let normalizedDate = calendar.startOfDay(for: date)
         let key = dayKey(for: normalizedDate)
+        let isToday = calendar.isDate(normalizedDate, inSameDayAs: today)
+        let shouldAutoCompleteTrackedToday = isToday && habit.isTrackingEnabled && habit.goal == nil && quantity > 0
 
         habit.timeEntries.removeAll { "\($0.year)-\($0.month)-\($0.day)" == key }
         habit.completedDays.remove(key)
@@ -147,10 +386,11 @@ struct HabitHistorySheet: View {
         }
 
         if habit.isTrackingEnabled && quantity > 0 {
-            let components = calendar.dateComponents([.year, .month, .day], from: normalizedDate)
+            let loggedAt = isToday ? Date() : normalizedDate
+            let components = calendar.dateComponents([.year, .month, .day], from: loggedAt)
             habit.timeEntries.append(
                 TimeEntry(
-                    loggedAt: normalizedDate,
+                    loggedAt: loggedAt,
                     year: components.year ?? 0,
                     month: components.month ?? 0,
                     day: components.day ?? 0,
@@ -161,9 +401,11 @@ struct HabitHistorySheet: View {
             )
         }
 
-        if isComplete {
+        if shouldAutoCompleteTrackedToday || isComplete {
             habit.completedDays.insert(key)
         }
+
+        updateGoalCompletion(for: &habit, dayKey: key)
 
         if quantity > 0 || isComplete {
             adjustCreatedAtIfNeeded(for: normalizedDate)
@@ -199,9 +441,6 @@ struct HabitDayEditorView: View {
     @State private var isMarkedComplete: Bool
     @State private var isRestDay: Bool
 
-    private let keypadColumns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
-    private let keypadKeys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "⌫"]
-
     init(habit: Binding<Habit>, date: Date, onSave: @escaping (Date, Int, Bool, Bool) -> Void) {
         _habit = habit
         self.date = Calendar(identifier: .gregorian).startOfDay(for: date)
@@ -232,23 +471,10 @@ struct HabitDayEditorView: View {
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity, alignment: .center)
 
-                    Text(displayValue)
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                        .background(
-                            RoundedRectangle(cornerRadius: 20)
-                                .fill(Color.white.opacity(0.07))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 20)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                        )
-
                     if habit.isTrackingEnabled {
-                        keypad
+                        HabitQuantityKeypadView(quantityInput: $quantityInput) {
+                            isRestDay = false
+                        }
                             .layoutPriority(1)
                     }
 
@@ -319,62 +545,9 @@ struct HabitDayEditorView: View {
         return Int(quantity.rounded())
     }
 
-    private var displayValue: String {
-        quantityInput.isEmpty ? "0" : quantityInput
-    }
-
-    private var keypad: some View {
-        LazyVGrid(columns: keypadColumns, spacing: 12) {
-            ForEach(keypadKeys, id: \.self) { key in
-                keypadButton(for: key)
-            }
-        }
-    }
-
-    private func keypadButton(for key: String) -> some View {
-        Button {
-            handleKeypadInput(key)
-        } label: {
-            Text(key)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 50)
-                .background(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(Color.white.opacity(0.08))
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
     private func saveAndDismiss() {
         onSave(date, quantityValue, isMarkedComplete, isRestDay)
         dismiss()
-    }
-
-    private func handleKeypadInput(_ key: String) {
-        switch key {
-        case "⌫":
-            if quantityInput.count <= 1 {
-                quantityInput = "0"
-            } else {
-                quantityInput.removeLast()
-            }
-        case ".":
-            guard !quantityInput.contains(".") else { return }
-            quantityInput += "."
-        default:
-            if quantityInput == "0" {
-                quantityInput = key
-            } else {
-                quantityInput += key
-            }
-        }
-
-        if quantityValue > 0 || quantityInput.contains(".") {
-            isRestDay = false
-        }
     }
 
     private static func completionState(for habit: Habit, key: String, quantity: Int) -> Bool {

@@ -195,6 +195,7 @@ enum RewardProgressRule: String, Codable, CaseIterable, Identifiable {
 struct Reward: Identifiable {
     let id: UUID
     var name: String
+    var description: String
     var stampTarget: Int
     var linkedHabitID: UUID?
     var startDate: Date
@@ -208,6 +209,7 @@ struct Reward: Identifiable {
     init(
         id: UUID = UUID(),
         name: String,
+        description: String = "",
         stampTarget: Int,
         linkedHabitID: UUID? = nil,
         startDate: Date = Date(),
@@ -220,6 +222,7 @@ struct Reward: Identifiable {
     ) {
         self.id = id
         self.name = name
+        self.description = description
         self.stampTarget = stampTarget
         self.linkedHabitID = linkedHabitID
         self.startDate = startDate
